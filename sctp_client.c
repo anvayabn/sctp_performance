@@ -60,10 +60,8 @@ int create_socket(int domain, int type, int protocol)
 
 }
 
-int connect_socket(int socket_fd, int dom, int index)
-{
-    int ret ; 
-
+int connect_socket(int socket_fd, int dom, int index) {
+    int ret; 
     struct sockaddr_in servaddr;
     memset(&servaddr, 0, sizeof(servaddr)); 
     servaddr.sin_family = dom; 
@@ -71,14 +69,19 @@ int connect_socket(int socket_fd, int dom, int index)
     servaddr.sin_addr.s_addr = inet_addr(server_ip); 
 
     ret = connect(socket_fd, (struct sockaddr *)&servaddr, sizeof(servaddr)); 
-    if ( ret < 0){
-        perror("Connect failed\n");
-        goto ex;
+    if (ret < 0) {
+        if (errno == EINPROGRESS) {
+            connected[index] = socket_fd;  // Mark the socket as connected
+            return 0;  // Return success because this is expected in non-blocking mode
+        } else {
+            perror("Connect failed\n");
+            return ret; 
+        }
     }
     connected[index] = socket_fd;
-ex:
-    return ret ; 
+    return ret; 
 }
+
 
 int make_socket_non_blocking(int sfd) {
     int flags = fcntl(sfd, F_GETFL, 0);
@@ -156,6 +159,7 @@ void server() {
         
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == listen_fd) {
+                printf("got connection \n"); 
                 int conn_fd = accept(listen_fd, NULL, NULL);
                 make_socket_non_blocking(conn_fd);
                 event.data.fd = conn_fd;
@@ -163,7 +167,7 @@ void server() {
             } else {
                 if (events[i].events & EPOLLIN){
                     int sfd = events[i].data.fd; 
-                    bzero(input_buffer, MAX_BUFFER); 
+                    bzero(input_buffer, MAX_BUFFER);
                     size_t readlen = recv(sfd, input_buffer, sizeof(input_buffer), 0); 
                     size_t sendlen = send(sfd, output_buffer, message_size, 0); 
                 }
