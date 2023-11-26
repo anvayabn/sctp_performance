@@ -33,7 +33,7 @@ int type = SOCK_STREAM;
 int protocol = IPPROTO_SCTP; 
 
 /* event poll */
-#define DEFAULT_BLOCK_TIME 0
+#define DEFAULT_BLOCK_TIME -1
 
 
 /* IO buffer */
@@ -68,7 +68,7 @@ int server(){
 
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(server_port);
+    server_addr.sin_port = htons(3000);
     if (inet_pton(AF_INET, "10.10.1.1", &server_addr.sin_addr) <= 0) {
         perror("inet_pton");
         exit(EXIT_FAILURE);
@@ -183,8 +183,8 @@ int client(int no_conn)
 
         memset(&server_addr, 0, sizeof(server_addr));
         server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(server_port);
-        inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
+        server_addr.sin_port = htons(3000);
+        inet_pton(AF_INET, "10.10.1.1", &server_addr.sin_addr);
 
         if (connect(sockfd[i], (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
             if (errno != EINPROGRESS) {
@@ -214,7 +214,7 @@ int client(int no_conn)
             break;
         }
 
-        int n = epoll_wait(epfd, events, MAX_EVENTS, DEFAULT_BLOCK_TIME);
+        int n = epoll_wait(epfd, events, MAX_EVENTS, 1000);
         if (n == 0){
             continue;
         }else if (n < 0){
@@ -235,6 +235,18 @@ int client(int no_conn)
             
             if (events[i].events & EPOLLOUT) {
                 int fd = events[i].data.fd;
+                int error = 0;
+                socklen_t errlen = sizeof(error);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errlen) == -1) {
+                    perror("getsockopt");
+                    close(fd);
+                    continue;
+                }   
+                if (error != 0) {
+                    fprintf(stderr, "Connection failed: %s\n", strerror(error));
+                    close(fd);
+                    continue;
+                }                
                 size_t sendlen = send(fd, output_buffer, (size_t)message_size, 0); 
                 if (sendlen == -1 ){
                     perror("send failed"); 
@@ -262,7 +274,6 @@ int client(int no_conn)
                     continue;
                 }
                 total_bytes_received += readlen;
-                // send(events[i].data.fd, output_buffer, message_size, 0);
             }
 
         }
