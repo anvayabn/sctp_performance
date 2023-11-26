@@ -67,7 +67,7 @@ int connect_socket(int socket_fd, int dom, int index)
     struct sockaddr_in servaddr;
     memset(&servaddr, 0, sizeof(servaddr)); 
     servaddr.sin_family = dom; 
-    servaddr.sin_port = server_port; 
+    servaddr.sin_port = hton(server_port); 
     servaddr.sin_addr.s_addr = inet_addr(server_ip); 
 
     ret = connect(socket_fd, (struct sockaddr *)&servaddr, sizeof(servaddr)); 
@@ -109,7 +109,13 @@ void add_to_epoll_set(int epollfd, int not){
 }
 
 void server() {
-    int listen_fd = socket(dom, type, protocol);
+    printf("Server starting : Ip : %s, Port : %d\n", server_ip, server_port); 
+
+    int listen_fd = create_socket(dom, type, protocol);
+    if ( listen_fd < 0 ){
+        printf("Socket Create failed\n"); 
+        exit(1);
+    }
 
     /* make it non blocking */
     make_socket_non_blocking(listen_fd);
@@ -120,11 +126,20 @@ void server() {
     addr.sin_addr.s_addr = inet_addr(server_ip);
     addr.sin_port = htons(server_port);
 
-    bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
+    int ret; 
+    ret = bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if ( ret < 0 ){
+        printf("Bind failed\n"); 
+        exit(1); 
+    }
 
-    listen(listen_fd, MAX_EVENTS);
+    ret = listen(listen_fd, MAX_EVENTS);
+    if (ret < 0 ){
+        printf("Listen failed\n"); 
+        exit(1); 
+    }
 
-    int epoll_fd = epoll_create1(0);
+    int epoll_fd = epoll_create(MAX_EVENTS);
     struct epoll_event event;
     event.events = EPOLLIN;
     event.data.fd = listen_fd;
@@ -132,8 +147,13 @@ void server() {
 
     while (1) {
         struct epoll_event events[MAX_EVENTS];
-        int n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-
+        int n = epoll_wait(epoll_fd, events, MAX_EVENTS, 0);
+        if (n < 0 )
+        {
+            printf("Epoll failed \n"); 
+            break; 
+        }
+        
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == listen_fd) {
                 int conn_fd = accept(listen_fd, NULL, NULL);
@@ -216,7 +236,7 @@ int client(int not){
     }
 
     cleanup(); 
-    
+
     return 0; 
 }
 
