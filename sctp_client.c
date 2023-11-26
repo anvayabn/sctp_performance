@@ -67,7 +67,7 @@ int connect_socket(int socket_fd, int dom, int index)
     struct sockaddr_in servaddr;
     memset(&servaddr, 0, sizeof(servaddr)); 
     servaddr.sin_family = dom; 
-    servaddr.sin_port = hton(server_port); 
+    servaddr.sin_port = htons(server_port); 
     servaddr.sin_addr.s_addr = inet_addr(server_ip); 
 
     ret = connect(socket_fd, (struct sockaddr *)&servaddr, sizeof(servaddr)); 
