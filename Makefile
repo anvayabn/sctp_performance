@@ -3,7 +3,7 @@
 CC=gcc
 CFLAGS=-Wall -g
 LDFLAGS=
-LIBS=-lpthread
+LIBS=-lsctp
 
 # Name of the final executable
 TARGET=sctp_client

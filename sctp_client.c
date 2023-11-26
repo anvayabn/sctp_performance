@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/sctp.h>
@@ -12,7 +11,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 
-#define MAX_EVENTS 512
+#define MAX_EVENTS 256
 #define DEFAULT_MODE 1 
 
 #define DEFAULT_SERVER_IP "127.0.0.1"
@@ -28,11 +27,6 @@ int message_size = DEFAULT_MESSAGE_SIZE;
 int mode = DEFAULT_MODE; 
 int duration  = DEFAULT_DURATION ;
 
-/* socket */
-int sockfd[MAX_EVENTS] = {-1}; 
-int connected[MAX_EVENTS] = {-1};
-int epolfd;
-
 /* socket flags */
 int dom = AF_INET; 
 int type = SOCK_STREAM; 
@@ -40,7 +34,6 @@ int protocol = IPPROTO_SCTP;
 
 /* event poll */
 #define DEFAULT_BLOCK_TIME 0
-struct epoll_event ev_list[MAX_EVENTS];
 
 
 /* IO buffer */
@@ -48,201 +41,245 @@ struct epoll_event ev_list[MAX_EVENTS];
 char input_buffer[MAX_BUFFER]; 
 char output_buffer[MAX_BUFFER]; 
 
-int create_socket(int domain, int type, int protocol)
-{
-    int ret; 
-    ret = socket(domain, type, protocol); 
-    if (ret == -1 ){
-        perror("Socket Create failed\n"); 
+void make_socket_non_blocking(int sfd) {
+    int flags = fcntl(sfd, F_GETFL, 0);
+    if (flags < 0) {
+        perror("fcntl");
+        exit(EXIT_FAILURE);
     }
-
-    return ret ; 
-
+    flags |= O_NONBLOCK;
+    if (fcntl(sfd, F_SETFL, flags) < 0) {
+        perror("fcntl");
+        exit(EXIT_FAILURE);
+    }
 }
 
-int connect_socket(int socket_fd, int dom, int index) {
-    int ret; 
-    struct sockaddr_in servaddr;
-    memset(&servaddr, 0, sizeof(servaddr)); 
-    servaddr.sin_family = dom; 
-    servaddr.sin_port = htons(server_port); 
-    servaddr.sin_addr.s_addr = inet_addr(server_ip); 
+int server(){
+    {
+    int sfd, efd;
+    struct sockaddr_in server_addr;
+    struct epoll_event event, events[MAX_EVENTS];
 
-    ret = connect(socket_fd, (struct sockaddr *)&servaddr, sizeof(servaddr)); 
-    if (ret < 0) {
-        if (errno == EINPROGRESS) {
-            connected[index] = socket_fd; 
-            return 0;
-        } else {
-            perror("Connect failed\n");
-            return ret; 
+    sfd = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    if (sfd == -1) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(server_port);
+    if (inet_pton(AF_INET, "10.10.1.1", &server_addr.sin_addr) <= 0) {
+        perror("inet_pton");
+        exit(EXIT_FAILURE);
+    }
+
+    if (bind(sfd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1) {
+        perror("bind");
+        exit(EXIT_FAILURE);
+    }
+
+    make_socket_non_blocking(sfd);
+
+    if (listen(sfd, SOMAXCONN) == -1) {
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
+
+    efd = epoll_create1(0);
+    if (efd == -1) {
+        perror("epoll_create");
+        exit(EXIT_FAILURE);
+    }
+
+    event.data.fd = sfd;
+    event.events = EPOLLIN;
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event) == -1) {
+        perror("epoll_ctl");
+        exit(EXIT_FAILURE);
+    }
+
+    while (1) {
+        int n = epoll_wait(efd, events, MAX_EVENTS, DEFAULT_BLOCK_TIME);
+        for (int i = 0; i < n; i++) {
+            if ((events[i].events & EPOLLERR) ||
+                (events[i].events & EPOLLHUP) ||
+                (!(events[i].events & EPOLLIN))) {
+                perror("epoll error");
+                close(events[i].data.fd);
+                continue;
+            } else if (sfd == events[i].data.fd) {
+                struct sockaddr in_addr;
+                socklen_t in_len = sizeof(in_addr);
+                int infd = accept(sfd, &in_addr, &in_len);
+                if (infd == -1) {
+                    perror("accept");
+                    continue;
+                }
+    
+                make_socket_non_blocking(infd);
+    
+                event.data.fd = infd;
+                event.events = EPOLLIN;
+                if (epoll_ctl(efd, EPOLL_CTL_ADD, infd, &event) == -1) {
+                    perror("epoll_ctl");
+                    exit(EXIT_FAILURE);
+                }
+            } else {
+                int done = 0;
+    
+                while (1) {
+                    ssize_t count = recv(events[i].data.fd, input_buffer, sizeof(input_buffer), 0);
+                    if (count == -1) {
+                        if (errno != EAGAIN) {
+                            perror("recv");
+                            done = 1;
+                        }
+                        break;
+                    } else if (count == 0) {
+                        done = 1;
+                        break;
+                    }
+
+                    ssize_t sent = send(events[i].data.fd, output_buffer, message_size, 0);
+                    if (sent == -1) {
+                        perror("send");
+                        done = 1;
+                        break;
+                    }
+                }
+    
+                if (done) {
+                    printf("Closed connection on descriptor %d\n", events[i].data.fd);
+                    close(events[i].data.fd);
+                }
+            }
         }
     }
-    connected[index] = socket_fd;
-    return ret; 
-}
 
-
-int make_socket_non_blocking(int sfd) {
-    int flags = fcntl(sfd, F_GETFL, 0);
-    if (flags == -1) {
-        perror("fcntl F_GETFL");
-        return -1;
-    }
-
-    flags |= O_NONBLOCK;
-    if (fcntl(sfd, F_SETFL, flags) == -1) {
-        perror("fcntl F_SETFL");
-        return -1;
-    }
-
+    close(sfd);
     return 0;
 }
 
-void add_to_epoll_set(int epollfd, int not){
-    for (int i = 0 ; i < not; i++){
-        if (connected[i] > 0){
-            struct epoll_event ev;
-            ev.events = EPOLLIN;
-            ev.data.fd = connected[i];
-            epoll_ctl(epolfd, EPOLL_CTL_ADD, connected[i], &ev);
-        }
-    }
-
 }
 
-void server() {
-    printf("Server starting : Ip : %s, Port : %d\n", server_ip, server_port); 
-
-    int listen_fd = create_socket(dom, type, protocol);
-    if ( listen_fd < 0 ){
-        printf("Socket Create failed\n"); 
-        exit(1);
-    }
-
-    /* make it non blocking */
-    make_socket_non_blocking(listen_fd);
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(server_ip);
-    addr.sin_port = htons(server_port);
-
-    int ret; 
-    ret = bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr));
-    if ( ret < 0 ){
-        printf("Bind failed\n"); 
-        exit(1); 
-    }
-
-    ret = listen(listen_fd, MAX_EVENTS);
-    if (ret < 0 ){
-        printf("Listen failed\n"); 
-        exit(1); 
-    }
-
-    int epoll_fd = epoll_create(MAX_EVENTS);
+int client(int no_conn)
+{
+    int sockfd[no_conn]; 
+    int epfd;
+    struct sockaddr_in server_addr;
+    struct epoll_event events[MAX_EVENTS * no_conn];
     struct epoll_event event;
-    event.events = EPOLLIN;
-    event.data.fd = listen_fd;
-    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
+    
+    epfd = epoll_create1(0);
 
-    while (1) {
-        struct epoll_event events[MAX_EVENTS];
-        int n = epoll_wait(epoll_fd, events, MAX_EVENTS, 0);
-        if (n < 0 )
-        {
-            printf("Epoll failed \n"); 
-            break; 
+    for ( int i = 0 ; i < no_conn ; i++){
+        if ((sockfd[i] = socket(dom, type, protocol)) < 0){
+            perror("Failed creating socket");
+            exit(EXIT_FAILURE); 
         }
-        
-        for (int i = 0; i < n; i++) {
-            if (events[i].data.fd == listen_fd) {
-                printf("got connection \n"); 
-                int conn_fd = accept(listen_fd, NULL, NULL);
-                make_socket_non_blocking(conn_fd);
-                event.data.fd = conn_fd;
-                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, conn_fd, &event);
-            } else {
-                if (events[i].events & EPOLLIN){
-                    int sfd = events[i].data.fd; 
-                    bzero(input_buffer, MAX_BUFFER);
-                    size_t readlen = recv(sfd, input_buffer, sizeof(input_buffer), 0); 
-                    size_t sendlen = send(sfd, output_buffer, message_size, 0); 
-                }
+
+        make_socket_non_blocking(sockfd[i]);
+
+        memset(&server_addr, 0, sizeof(server_addr));
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(server_port);
+        inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
+
+        if (connect(sockfd[i], (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+            if (errno != EINPROGRESS) {
+                perror("connect");
+                exit(EXIT_FAILURE);
             }
         }
-    }   
-} 
 
-void cleanup() {
-    for (int i = 0; i < MAX_EVENTS; i++) {
-        if (sockfd[i] != -1) {
-            close(sockfd[i]);
-            sockfd[i] = -1;
+        event.data.fd = sockfd[i]; 
+        event.events = EPOLLIN | EPOLLOUT; 
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd[i], &event) != 0){
+            perror("cannot add to epoll list"); 
+            exit(EXIT_FAILURE); 
         }
     }
-}
 
-int client(int not){
-    printf("Client Starting....\n");
+    struct timespec start_time, current_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
 
-    epolfd = epoll_create(MAX_EVENTS);
-    printf("Here: epoll ccreate\n");
+    long total_bytes_sent = 0;
+    long total_bytes_received = 0;
 
-    for ( int i = 0 ; i < not ; i ++){
-        printf("Here: socket create \n");
-        sockfd[i] = create_socket(dom, type, protocol);
-
-        make_socket_non_blocking(sockfd[i]); 
-
-        connect_socket(sockfd[i], dom, i);
-    }
-
-    /* add connected sockets to epoll-set*/
-    add_to_epoll_set(epolfd, not); 
-
-    int start = 1 ; 
-    time_t start_time = time(NULL); 
-
-    while (start) {
-        printf("Here: start loop\n");
-        int ret = epoll_wait(epolfd, ev_list, MAX_EVENTS, DEFAULT_BLOCK_TIME); 
-        
-        time_t current_time = time(NULL);
-        if (difftime(current_time, start_time) >= duration) {
+    /* Event loop*/
+    while (1){
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+        if (current_time.tv_sec - start_time.tv_sec > duration) {
             break;
         }
 
-        /* there is a fault */
-        if (ret < 0 ){
-            printf("Fault at epoll\n"); 
-        }else if (ret > 0 ){
-            /* do all the reading here */
-            int nconnections = ret;
-            for (int i = 0 ; i < nconnections; i ++ ){
-                if (ev_list[i].events & EPOLLIN){
-                    int sfd =  ev_list[i].data.fd;
-                    bzero(input_buffer, MAX_BUFFER); 
-                    size_t read_len = recv(sfd, input_buffer, sizeof(input_buffer), 0); 
-                }
-            }
-             
+        int n = epoll_wait(epfd, events, MAX_EVENTS, DEFAULT_BLOCK_TIME);
+        if (n == 0){
+            continue;
+        }else if (n < 0){
+            perror("epollwait failed");
+            exit(EXIT_FAILURE); 
         }
 
-        /* if nothing to read just keep sending data */
-        for ( int i = 0 ; i < not ; i ++){
-            if (connected[i] > 0){
-                size_t send_len = send(connected[i], output_buffer, message_size, 0);
+        for (int i = 0 ; i < n ; i ++){
+            if ( events[i].events & EPOLLERR ||
+                 events[i].events & EPOLLHUP ||
+                 !(events[i].events & (EPOLLIN | EPOLLOUT))) 
+            {
+                perror("epoll event error");
+                close(events[i].data.fd);
+                continue;
+            
             }
+            
+            if (events[i].events & EPOLLOUT) {
+                int fd = events[i].data.fd;
+                size_t sendlen = send(fd, output_buffer, (size_t)message_size, 0); 
+                if (sendlen == -1 ){
+                    perror("send failed"); 
+                    continue;
+                }else if (sendlen== 0){
+                    close(fd);
+                    continue;
+                }
+                
+                total_bytes_sent += sendlen;
+
+                event.data.fd = events[i].data.fd;
+                event.events = EPOLLIN;
+                epoll_ctl(epfd, EPOLL_CTL_MOD, events[i].data.fd, &event);
+            }
+
+            if (events[i].events & EPOLLIN) {
+                ssize_t readlen = recv(events[i].data.fd, input_buffer, sizeof(input_buffer), 0);
+                if (readlen== -1) {
+                    perror("recv failed");
+                    close(events[i].data.fd);
+                    continue;
+                } else if (readlen == 0) {
+                    close(events[i].data.fd);
+                    continue;
+                }
+                total_bytes_received += readlen;
+                // send(events[i].data.fd, output_buffer, message_size, 0);
+            }
+
         }
+
 
     }
 
-    cleanup(); 
+    double throughput = (double)(total_bytes_sent + total_bytes_received) / duration;
 
-    return 0; 
+    printf("Throughput: %f bytes/sec\n", throughput);
+
+    for (int i = 0; i < no_conn; i++) {
+        close(sockfd[i]);
+    }
+    close(epfd);
+
+    return 0;
 }
 
 static void usage(const char *prog)
@@ -299,7 +336,7 @@ int main(int argc, char *argv[])
     /* parse the cmd line */
     parse_command_line(argc, argv); 
 
-    int number_of_conn = num_threads ;
+    int number_of_conn = num_threads;
 
     /* prepare buffer */
     bzero(output_buffer, message_size); 
