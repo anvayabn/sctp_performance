@@ -71,8 +71,8 @@ int connect_socket(int socket_fd, int dom, int index) {
     ret = connect(socket_fd, (struct sockaddr *)&servaddr, sizeof(servaddr)); 
     if (ret < 0) {
         if (errno == EINPROGRESS) {
-            connected[index] = socket_fd;  // Mark the socket as connected
-            return 0;  // Return success because this is expected in non-blocking mode
+            connected[index] = socket_fd; 
+            return 0;
         } else {
             perror("Connect failed\n");
             return ret; 
@@ -189,14 +189,15 @@ int client(int not){
     printf("Client Starting....\n");
 
     epolfd = epoll_create(MAX_EVENTS);
-    
+    printf("Here: epoll ccreate\n");
+
     for ( int i = 0 ; i < not ; i ++){
+        printf("Here: socket create \n");
         sockfd[i] = create_socket(dom, type, protocol);
 
         make_socket_non_blocking(sockfd[i]); 
 
         connect_socket(sockfd[i], dom, i);
-
     }
 
     /* add connected sockets to epoll-set*/
@@ -206,7 +207,7 @@ int client(int not){
     time_t start_time = time(NULL); 
 
     while (start) {
-
+        printf("Here: start loop\n");
         int ret = epoll_wait(epolfd, ev_list, MAX_EVENTS, DEFAULT_BLOCK_TIME); 
         
         time_t current_time = time(NULL);
