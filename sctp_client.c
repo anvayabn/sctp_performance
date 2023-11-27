@@ -274,6 +274,10 @@ int client(int no_conn)
                     continue;
                 }
                 total_bytes_received += readlen;
+
+                event.data.fd = events[i].data.fd;
+                event.events = EPOLLOUT;
+                epoll_ctl(epfd, EPOLL_CTL_MOD, events[i].data.fd, &event);
             }
 
         }
@@ -281,9 +285,11 @@ int client(int no_conn)
 
     }
 
-    double throughput = (double)(total_bytes_sent + total_bytes_received) / duration;
-
-    printf("Throughput: %f bytes/sec\n", throughput);
+    double throughput = ((double)(total_bytes_sent + total_bytes_received) / duration) / 1024;
+    printf( "Total data transfer : %ld KBytes\n", ((total_bytes_received + total_bytes_sent)/ 1024));
+    printf("Total KBytes sent : %ld\n", (total_bytes_sent/1024)); 
+    printf("Total KBytes recv : %ld\n", (total_bytes_received/1024)); 
+    printf("Throughput: %f Kb/sec\n", throughput);
 
     for (int i = 0; i < no_conn; i++) {
         close(sockfd[i]);
